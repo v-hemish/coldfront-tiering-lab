@@ -1,0 +1,110 @@
+# 3-node Spock mesh stack for the CI matrix. Same parameterized image as
+# vanilla (docker/Dockerfile.duckdb15) but MESH=on, so the entrypoint loads
+# snowflake,spock,pg_duckdb,coldfront and writes the mesh GUCs (wal_level
+# logical, spock.*, snowflake.node, dblink_self). spock + snowflake + dblink
+# are bundled in the pgEdge base; pg_duckdb is compiled in; coldfront installed.
+#
+#   PG_MAJOR=18 docker compose -f docker-compose.mesh.yml up -d --build
+#
+# ci/topo/mesh.sh drives this: brings the nodes up, forms the Spock mesh
+# (node_create + 6 bidirectional subs), then runs the journey + mesh stories
+# against db1. Lakekeeper runs on its OWN dedicated Postgres (never a data node).
+#
+# COLDFRONT_SNOWFLAKE_NODE is any per-node UNIQUE integer 1..1023. Uniqueness is
+# required (snowflake ids and the bakery's per-node identity); the value is
+# otherwise arbitrary — the bakery matches acks by spock node name, not by id.
+services:
+  db1:
+    build: { context: ., dockerfile: docker/Dockerfile.duckdb15, args: { PG_MAJOR: "${PG_MAJOR:-18}" } }
+    hostname: db1
+    environment:
+      PG_MAJOR: "${PG_MAJOR:-18}"
+      MESH: "on"
+      COLDFRONT_SNOWFLAKE_NODE: "1"
+      COLDFRONT_WAREHOUSE: wh
+      COLDFRONT_LAKEKEEPER: http://lakekeeper:8181/catalog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coldfront -d coldfront"]
+      interval: 3s
+      timeout: 2s
+      retries: 25
+
+  db2:
+    build: { context: ., dockerfile: docker/Dockerfile.duckdb15, args: { PG_MAJOR: "${PG_MAJOR:-18}" } }
+    hostname: db2
+    environment:
+      PG_MAJOR: "${PG_MAJOR:-18}"
+      MESH: "on"
+      COLDFRONT_SNOWFLAKE_NODE: "2"
+      COLDFRONT_WAREHOUSE: wh
+      COLDFRONT_LAKEKEEPER: http://lakekeeper:8181/catalog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coldfront -d coldfront"]
+      interval: 3s
+      timeout: 2s
+      retries: 25
+
+  db3:
+    build: { context: ., dockerfile: docker/Dockerfile.duckdb15, args: { PG_MAJOR: "${PG_MAJOR:-18}" } }
+    hostname: db3
+    environment:
+      PG_MAJOR: "${PG_MAJOR:-18}"
+      MESH: "on"
+      COLDFRONT_SNOWFLAKE_NODE: "3"
+      COLDFRONT_WAREHOUSE: wh
+      COLDFRONT_LAKEKEEPER: http://lakekeeper:8181/catalog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coldfront -d coldfront"]
+      interval: 3s
+      timeout: 2s
+      retries: 25
+
+  seaweedfs:
+    # Pinned for reproducibility. No -s3.iam.config here: the mesh vended lane is
+    # deferred (static mesh cells cover row/flag replication), so mesh stays on
+    # the static admin identity.
+    image: chrislusf/seaweedfs:4.38
+    command: "server -s3 -dir=/data -s3.config=/etc/seaweedfs/s3.json"
+    volumes:
+      - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+
+  lakekeeper-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lakekeeper
+      POSTGRES_PASSWORD: lakekeeper
+      POSTGRES_DB: lakekeeper
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakekeeper"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:latest
+    command: migrate
+    depends_on:
+      lakekeeper-db:
+        condition: service_healthy
+    environment:
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgres://lakekeeper:lakekeeper@lakekeeper-db:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgres://lakekeeper:lakekeeper@lakekeeper-db:5432/lakekeeper
+      LAKEKEEPER__PG_ENCRYPTION_KEY: deadbeefdeadbeefdeadbeefdeadbeef
+
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:latest
+    command: serve
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+    environment:
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgres://lakekeeper:lakekeeper@lakekeeper-db:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgres://lakekeeper:lakekeeper@lakekeeper-db:5432/lakekeeper
+      LAKEKEEPER__PG_ENCRYPTION_KEY: deadbeefdeadbeefdeadbeefdeadbeef
+      LAKEKEEPER__LISTEN_PORT: 8181
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s

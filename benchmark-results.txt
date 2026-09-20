@@ -1,0 +1,90 @@
+
+native_hot_point
+----------------
+mean:    0.242 ms
+p50 :    0.231 ms
+p95 :    0.356 ms
+p99 :    0.382 ms
+min :    0.175 ms
+max :    0.514 ms
+
+coldfront_hot_point
+-------------------
+mean:    0.258 ms
+p50 :    0.255 ms
+p95 :    0.300 ms
+p99 :    0.312 ms
+min :    0.221 ms
+max :    0.324 ms
+
+native_old_point
+----------------
+mean:    0.188 ms
+p50 :    0.183 ms
+p95 :    0.223 ms
+p99 :    0.236 ms
+min :    0.160 ms
+max :    0.242 ms
+
+coldfront_cold_point
+--------------------
+mean:   12.850 ms
+p50 :   12.329 ms
+p95 :   15.174 ms
+p99 :   16.456 ms
+min :   11.465 ms
+max :   19.526 ms
+
+native_recent_agg
+-----------------
+mean:   11.731 ms
+p50 :   11.739 ms
+p95 :   11.869 ms
+p99 :   11.911 ms
+min :   11.479 ms
+max :   11.932 ms
+
+coldfront_recent_agg
+--------------------
+mean:   33.817 ms
+p50 :   32.144 ms
+p95 :   38.374 ms
+p99 :   53.171 ms
+min :   30.661 ms
+max :   70.922 ms
+
+native_old_month_agg
+--------------------
+mean:    7.328 ms
+p50 :    7.158 ms
+p95 :    7.995 ms
+p99 :    9.522 ms
+min :    6.865 ms
+max :    9.846 ms
+
+coldfront_old_month_agg
+-----------------------
+mean:   18.323 ms
+p50 :   18.155 ms
+p95 :   19.648 ms
+p99 :   20.429 ms
+min :   16.861 ms
+max :   21.692 ms
+
+native_full_agg
+---------------
+mean:   60.785 ms
+p50 :   58.171 ms
+p95 :   67.703 ms
+p99 :   89.611 ms
+min :   56.489 ms
+max :  116.720 ms
+
+coldfront_full_agg
+------------------
+mean:   50.418 ms
+p50 :   48.996 ms
+p95 :   57.278 ms
+p99 :   73.727 ms
+min :   45.611 ms
+max :   75.320 ms

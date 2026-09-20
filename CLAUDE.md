@@ -1,0 +1,76 @@
+# Development Preferences
+
+## Process
+- Use Test Driven Development: write tests first, then implementation. Not after, not alongside — before.
+- Priority: smoke tests, integration tests, and endpoint tests over unit tests
+- Every public function should have a unit test
+- Run `make test` after every change
+- MUST run `./run-ci-local.sh` before every commit — it runs gofmt, golangci-lint, tests, build, Docker integration tests
+- GitHub Actions CI must always be identical in steps to `run-ci-local.sh` — never let them diverge
+- MUST verify any mesh/distributed/bakery change against the TLA+ model before committing it. Scope (the cold-write serialization protocol): the bakery functions in `extension/coldfront/coldfront--1.0.sql` (`_claim_iceberg_lock`, `_release_iceberg_lock`, `_exec_iceberg_with_claim`, `_enqueue_release`, `_on_claim_apply`, `_on_claim_release`, `_ensure_claims_replicated`), the C `XactCallback` in `extension/coldfront/src/coldfront.c` (`coldfront_xact_callback` + its `RegisterXactCallback` ordering), the `coldfront.iceberg_async_parquet` ordering, and the spock/`synchronous_*` GUCs gating claim replication. The one question: does the change alter the modeled protocol (claimant set, claim/conditional-update/release ordering, async-vs-stock parquet ordering, defer/drain steps)? If yes, model it first: update `docs/formal/Bakery_v2.tla` (and `Bakery.tla` if the abstraction shifts), re-translate (`pcal.trans`), and re-run every TLC config (safe configs report "No error has been found"; `Bakery_v2_race.cfg` still violates `NoLakekeeperConflict`). If no (a pure refactor whose emitted claim/lock/release sequence is byte-identical, leaving the `.tla`/`.cfg` untouched), that equivalence argument IS the proof: do NOT re-run TLC, since an unchanged model only reprints the same verdicts. See `docs/formal/README.md`.
+- Update README.md as you implement functionality; update ARCHITECTURE.md in the same commit as the structural change it describes
+
+## Git
+- NEVER overwrite or delete files without checking if they are committed
+- NEVER use the word "release" in git tag names (use "v0.1.0" not "Release v0.1.0")
+- Commit messages should be short, one-line, imperative (e.g. "fix: bump Go from 1.22 to 1.24")
+- No `chore:` prefix — use `fix:`, `feat:`, `build:`, `deps:`, `refactor:`, `test:`, `docs:` or a plain verb
+- No verbose multi-paragraph commit message bodies
+- NEVER use `git checkout` or `git restore` on files with uncommitted changes — use Edit tool instead
+- Prefer adding specific files by name (`git add src/foo/bar.go`) over `git add -A` or `git add .` — protects against accidentally staging secrets or large binaries
+- When splitting a commit, land deps/extras declarations AFTER the code that consumes them — every intermediate commit in history should represent a working state
+- Never push, force-push, or open PRs without explicit user instruction. Never skip hooks (`--no-verify` etc.) without explicit user instruction.
+
+## Code Style
+- KISS: absolute minimum lines of code
+- DRY: no repeated logic — extract shared code, but only when there are at least two real callers
+- stdlib-first: use Go standard library where possible
+- No ORM: plain SQL with parameterized queries
+- Hand-written mocks: no mock frameworks, define mock structs locally in test files
+- Explicit error handling, no panic
+- No speculative abstractions, no backwards-compatibility shims for scenarios that can't happen, no hypothetical-future configurability
+- Don't hardcode lists that can be derived at runtime (e.g. column names from pg_catalog). Every hardcoded value is a future bug.
+- Comments document only the CURRENT code — never changelog narration ("previously", "used to", "this changed", "now does", "FIX:"). History lives in git, not in the source.
+
+## Working Style
+- Before making changes that span multiple files, mentally trace the FULL end-to-end path: data origin → what the code does with it → where it lands → how the query pipeline sees it
+- Don't refactor interfaces (add parameters, rename types) until you've verified the concrete scenario works. Test the simple case first, abstract second.
+- When an e2e test fails: read the FULL error, understand the root cause, simulate the fix mentally, THEN make ONE targeted change. Don't whack-a-mole.
+- Never use `sudo` — if an operation requires root, tell the user and let them handle it
+
+## Files to Ignore
+- NEVER read, reference, or act on `OLD_PLAN.md.IGNORE`
+
+## Dependencies (keep minimal)
+- github.com/jackc/pgx/v5 (PostgreSQL driver — use pgxpool directly)
+- gopkg.in/yaml.v3 (config)
+- github.com/stretchr/testify (test assertions only)
+- pg_duckdb 1.5.4 (PR #1025, DuckDB 1.5.4) + patched duckdb-iceberg, prebuilt into the `coldfront-duckdb-base` image — see [DUCKDB_1.5_PATCHED.md](DUCKDB_1.5_PATCHED.md)
+- DuckDB temp spills collide between sessions. Spill filenames (`duckdb_temp_storage_<size>-<index>.tmp`, `duckdb_temp_block-<id>.block`) carry no instance identifier and every DuckDB instance numbers them from 0, so backends sharing one `duckdb.temporary_directory` (including pg_duckdb's default `$PGDATA/pg_duckdb/temp`) read and truncate each other's files, and a backend whose instance is destroyed deletes every `duckdb_temp_*` file in that directory, live peers included. Reproduced on the 1.5.4 stack: 3 of 4 concurrent spilling sessions died with `IO Error: Could not read enough bytes`. Unfixed upstream (duckdb#15173 open, pg_duckdb#887 unmerged), so any concurrent spilling workload needs a per-backend temp directory.
+- Read or patch a vendored dependency's source ONLY at the ref the build consumes. `docker/Dockerfile.duckdb15-base` is the authority: it pins the pg_duckdb commit, `ICEBERG_REF`, and DuckDB `v1.5.4`. Before quoting or editing a line, run `git rev-parse HEAD` and `git submodule status` in the clone and compare. Local clones drift (a submodule can sit whole minor versions behind), and code read at the wrong ref is wrong. If the clone does not match, read the file from `raw.githubusercontent.com` at the pinned ref, or check out a `git worktree` at it.
+- `cmd/compactor/` is a separate Go module (apache/iceberg-go) — its heavy deps are quarantined from the lean archiver
+- `extension/coldfront/` — PGXS C extension. Requires `pg_config` and PG dev headers. Built inside the Docker image; users on bare-metal install with `make && make install`.
+
+## Releases
+- Version scheme — two independent namespaces:
+  - Release tags use 3-part SemVer (`vMAJOR.MINOR.PATCH`, e.g. `v1.0.0`). This is required, not stylistic: ColdFront is a Go module (`github.com/pgedge/coldfront`), and the toolchain only treats full `vX.Y.Z` tags as releases — a 2-part `v1.0` tag yields pseudo-versions. Git tags, GitHub releases, container image tags, and the changelog all use this form. The patch field keeps a bugfix-only release (`v1.0.1`) distinct from a feature release (`v1.1.0`).
+  - The PostgreSQL extension keeps the conventional 2-part version in `extension/coldfront/coldfront.control` (`default_version`) and the `coldfront--X.Y.sql` / `coldfront--X.Y--X.Z.sql` upgrade-script filenames, per PG convention. Extension `1.0` ships inside release `v1.0.0`; a patch release may carry the same extension version or bump it with an upgrade script when the SQL changes.
+- Build 4 static binaries per release: linux-amd64, linux-arm64, darwin-amd64, darwin-arm64
+- Build command: `CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/pgedge/coldfront/internal/version.Version=$TAG -X github.com/pgedge/coldfront/internal/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"` (the compactor stamps `-X main.Version` / `-X main.BuildTime`); `make build` derives the stamp from `git describe`
+- Release notes format: `## Added` / `## Changed` / `## Fixed`
+  - Only list user-facing changes — no internal test additions, no same-cycle fix churn
+  - `## Fixed` is for bugs that existed in the previous release, not things broken and fixed in the same cycle
+
+## Architecture
+- All Iceberg read/write happens through pg_duckdb (inside PostgreSQL)
+- Lakekeeper provides the Iceberg REST catalog
+- Any S3-compatible object store (SeaweedFS, MinIO, AWS S3, GCS, etc.)
+- The archiver is a thin SQL orchestrator — no DuckDB/Iceberg/Arrow Go libraries
+
+## Documentation
+- User docs live in `docs/` as a MkDocs site (pgEdge MkDocs structure); `README.md` is the GitHub landing/TOC. Build with `mkdocs build --strict` — it must pass with no warnings.
+- Keep `README.md` and `docs/index.md` near-identical, EXCEPT `docs/index.md` is user-facing and omits the developer-specific content that belongs only in a GitHub README: CI badges, build-from-source internals, the project-structure tree, dependency/build tables, and author/contributor info.
+- Internal/scratch docs (bench, experimental, hardening, comparison, backlog, scale-test, E2E) are gitignored and NEVER pushed to GitHub; never reference them from published docs.
+- ARCHITECTURE docs are reference material, not work logs: brief, present-tense, no history ("we used to…", version churn), no rejected-alternative narration. Keep the *why* (rationale that explains the design); cut the journey.
+- One home per topic, no duplication across docs: usage/modes/config/CLI and one-time setup in `docs/usage.md`; build-from-source and testing/CI in `docs/installation.md`; storage-backend setup in `docs/object_store.md`; deep dives in `docs/architecture*.md`. When moving a section, fix every cross-anchor that pointed at it.
+- Tracked build-journal docs (`DUCKDB_1.5_PATCHED.md`, `DUCKDB_1.5_UNPATCHED.md`) are kept as history and never deleted, but they are not part of the docs site: never link them from `README.md` or `docs/`. Point build internals at the real recipe, `docker/Dockerfile.duckdb15-base`.

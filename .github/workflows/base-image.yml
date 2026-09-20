@@ -1,0 +1,146 @@
+name: Base image (DuckDB 1.5.x)
+
+# Builds + publishes the coldfront-duckdb-base image (libcurl 8.12 + pg_duckdb
+# 1.5.4 + patched duckdb-iceberg) to ghcr.io/pgedge for PG 16/17/18. The app image
+# (docker/Dockerfile.duckdb15) does `FROM` this; CI and local builds pull it.
+#
+# Rebuilt only when the base inputs change (Dockerfile / iceberg patch / config)
+# or on manual dispatch — NOT on every push. The build is a cold ~30–60 min
+# DuckDB/iceberg compile per major; that's fine for an infrequent base rebuild.
+
+# Manual-only: a cold DuckDB + duckdb-iceberg + vcpkg compile on a free GitHub
+# runner is long (and risks the job timeout), so base rebuilds are deliberate.
+# Trigger from the Actions tab (or `gh workflow run base-image.yml`) when the base
+# inputs change (Dockerfile.duckdb15-base / the iceberg patch / config). For an
+# initial publish, pushing a locally-built base is faster — see DUCKDB_1.5_PATCHED.md.
+#
+# The arch/pg inputs scope a single one-off build (e.g. an arm64 smoke test on a
+# native ubuntu-24.04-arm runner, free for public repos). Left at defaults it
+# builds all three PG majors for amd64. Smoke builds default to NO push.
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Target arch(es)'
+        type: choice
+        default: both
+        options: [both, amd64, arm64]
+      pg:
+        description: 'PG major (single), or "all" for 16/17/18'
+        type: choice
+        default: all
+        options: [all, '18', '17', '16']
+      push:
+        description: 'Push to GHCR (off = smoke; on = per-arch + multi-arch + floating)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write   # GITHUB_TOKEN pushes to ghcr.io/pgedge
+
+env:
+  REPO: ghcr.io/pgedge/coldfront-duckdb-base
+
+jobs:
+  # Resolve inputs into a PG-major matrix, an arch matrix, and the version suffix
+  # (exact tag if HEAD is tagged, else the 8-char commit), shared by every build
+  # cell and the manifest stitch so all tags agree.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      pgs: ${{ steps.r.outputs.pgs }}
+      arches: ${{ steps.r.outputs.arches }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # full history + tags so git describe sees release tags
+      - name: Compute version suffix
+        id: v
+        run: |
+          set -euo pipefail
+          V=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short=8 HEAD)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Version suffix: $V"
+      - id: r
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.pg }}" = "all" ]; then
+            echo 'pgs=["18","17","16"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'pgs=["${{ inputs.pg }}"]' >> "$GITHUB_OUTPUT"
+          fi
+          case "${{ inputs.arch }}" in
+            both) echo 'arches=["amd64","arm64"]' >> "$GITHUB_OUTPUT" ;;
+            *)    echo 'arches=["${{ inputs.arch }}"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  # Build each (major, arch) natively: amd64 on ubuntu-latest, arm64 on the
+  # native ubuntu-24.04-arm runner (no QEMU). Pushes ONLY the immutable,
+  # version-suffixed per-arch tag, and only when push=true.
+  build:
+    needs: setup
+    name: base pg${{ matrix.pg }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(needs.setup.outputs.pgs) }}
+        arch: ${{ fromJSON(needs.setup.outputs.arches) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build base image (linux/${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          VTAG=pg${{ matrix.pg }}-${{ matrix.arch }}-${{ needs.setup.outputs.version }}
+          docker buildx build \
+            --platform linux/${{ matrix.arch }} \
+            --build-arg TARGETARCH=${{ matrix.arch }} \
+            --build-arg PG_MAJOR=${{ matrix.pg }} \
+            -f docker/Dockerfile.duckdb15-base \
+            -t "$REPO:$VTAG" \
+            --load .
+          echo "Built $REPO:$VTAG"
+      - name: Push per-arch image
+        if: ${{ inputs.push }}
+        run: |
+          set -euo pipefail
+          VTAG=pg${{ matrix.pg }}-${{ matrix.arch }}-${{ needs.setup.outputs.version }}
+          docker push "$REPO:$VTAG"
+          echo "Pushed $REPO:$VTAG"
+
+  # Stitch the per-arch images into multi-arch manifest lists and publish the
+  # floating tags. Runs ONLY when both arches were built AND push=true, so a
+  # default run (push off) or a single-arch run never publishes a floating tag.
+  manifest:
+    needs: [setup, build]
+    if: ${{ inputs.push && inputs.arch == 'both' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(needs.setup.outputs.pgs) }}
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Publish multi-arch + floating tags for pg${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          V=${{ needs.setup.outputs.version }}
+          AMD=$REPO:pg${{ matrix.pg }}-amd64-$V
+          ARM=$REPO:pg${{ matrix.pg }}-arm64-$V
+          docker buildx imagetools create -t $REPO:pg${{ matrix.pg }}    "$AMD" "$ARM"
+          docker buildx imagetools create -t $REPO:pg${{ matrix.pg }}-$V "$AMD" "$ARM"
+          docker buildx imagetools create -t $REPO:pg${{ matrix.pg }}-amd64 "$AMD"
+          docker buildx imagetools create -t $REPO:pg${{ matrix.pg }}-arm64 "$ARM"
+          echo "Published pg${{ matrix.pg }} (multi-arch + floating)"

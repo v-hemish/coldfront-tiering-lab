@@ -1,0 +1,14 @@
+# gitleaks configuration for ColdFront.
+#
+# Extends the full default ruleset; adds one narrowly-scoped allowlist for a
+# known unit-test fixture. There are no real secrets in this repository.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "cmd/compactor/config_test.go uses fake credentials only — e.g. a base64-of-\"keypadding\" Azure AccountKey in the storage-config parse test. Unit-test fixtures, not real secrets."
+paths = ['''cmd/compactor/config_test\.go''']
+
+[[allowlists]]
+description = "docker/seaweedfs-iam.json is CI-only config for the in-compose SeaweedFS STS test lane; its sts.signingKey is a dummy HMAC key that signs JWTs for the ephemeral test SeaweedFS, not a real secret."
+paths = ['''docker/seaweedfs-iam\.json''']
